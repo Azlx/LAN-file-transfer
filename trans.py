@@ -43,8 +43,17 @@ def client_socket(host):
 def progress_bar(total_size, change_size, speed, file_size_MB):
     hashes = '#' * int(float(change_size) / float(total_size) * bar_length)  # 计算已经接收了的进度条长度
     spaces = ' ' * (bar_length - len(hashes))  # 计算剩余进度条长度
-    sys.stdout.write(u"\r传输进度: [%s] %d%% 传输速度: %.2fMb/s  文件大小: %.2fMB" % (
-        hashes + spaces, float(change_size) / float(total_size) * 100, speed, file_size_MB))
+
+    len_bar = hashes + spaces
+    progress = float(change_size) / float(total_size) * 100
+
+    # 小文件传输bug修正
+    if len(len_bar) > 20:
+        len_bar = '#' * 20
+    if progress > 100:
+        progress = 100
+
+    sys.stdout.write(u"\r传输进度: [%s] %d%% 传输速度: %.2fMb/s  文件大小: %.2fMB" % (len_bar, progress, speed, file_size_MB))
 
     return sys.stdout.flush()
 
