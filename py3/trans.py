@@ -1,8 +1,11 @@
 import os
 import sys
 import time
+import json
 import socket
 import argparse
+
+from pathlib import Path
 
 # 进度条长度
 BAR_LENGTH = 20
@@ -97,7 +100,7 @@ def progress_bar(file_size, change_size, speed, fix_show_bar=False):
     format_file_size, format_file_size_unit = format_unit(file_size)
     file_size = '{0:.2f} {1}'.format(format_file_size, format_file_size_unit)
 
-    show_style = '\r传输进度: [{0}] {1:.2f}%  传输速度: {2}  文件大小: {3}'.\
+    show_style = '\r传输进度: [{0}] {1:.2f}%  传输速度: {2}  文件大小: {3}          '.\
         format(complete, percentage, speed, file_size)
 
     sys.stdout.write(show_style if not fix_show_bar else show_style + ' ' * 10)
@@ -155,6 +158,55 @@ def get_ipv4_address():
     return ipv4_list
 
 
+def get_files_list(dir_path, files=None):
+    """
+    获取指定目录的文件列表
+    :param dir_path: 目录路径
+    :param files: 返回值
+    :return:
+    """
+    dir_path = Path(dir_path)
+    if not dir_path.exists():
+        raise FileNotFoundError('该 {0} 目录或文件不存在'.format(dir_path))
+
+    files = files if files else []
+    if dir_path.is_dir():
+        for path_obj in dir_path.iterdir():
+            if path_obj.name == '.DS_Store':
+                continue
+
+            if path_obj.is_dir():
+                get_files_list(str(path_obj), files=files)
+            else:
+                files.append(str(path_obj))
+    else:
+        files.append(str(dir_path))
+
+    return files
+
+
+def print_msg(trans_type, trans_info, trans_size):
+    """
+    打印当前的传输信息
+    :param trans_type:
+    :param trans_info:
+    :param trans_size:
+    :return:
+    """
+    new_trans_size, new_trans_size_unit = format_unit(trans_size)
+    new_file_size, new_file_size_unit = format_unit(trans_info['file_info']['file_size'])
+    print('\n当前{0}第{1}个文件，总共{2}个\n文件名：{3}, 文件大小：{4:.2f}{5}, 每次传输的大小：{6:.2f}{7}'.format(
+        '传输' if trans_type == 'send' else '接收',
+        trans_info['current_number'],
+        trans_info['total_files'],
+        trans_info['file_info']['file_name'],
+        new_file_size,
+        new_file_size_unit,
+        new_trans_size,
+        new_trans_size_unit
+    ))
+
+
 def trans_server(trans_size, port):
     """
     服务端接收文件方法
@@ -171,24 +223,44 @@ def trans_server(trans_size, port):
     # 向客户端发送服务端每次能接收文件的大小
     server.send(str(trans_size).encode())
 
-    # 接收客户端传输的文件名
-    file_name = server.recv(1024).decode()
+    print('传输前数据准备完毕，开始接收文件：')
 
-    # 接收成功后，向客户端发送返回码1，告知客户端接收成功
-    server.send('1'.encode())
+    while True:
+        # 接收客户端传送的信息
+        trans_info = json.loads(server.recv(2048).decode())
 
-    # 接收文件大小信息
-    file_size = float(server.recv(1024).decode())
-    server.send('1'.encode())
+        # 向客户端传递 1，表示可以传输文件
+        server.send('1'.encode())
 
-    new_trans_size, new_trans_size_unit = format_unit(trans_size)
-    new_file_size, new_file_size_unit = format_unit(file_size)
-    print('接收准备就绪，文件名：{0}  文件大小：{1:.2f}{2}  每次传输的数据包大小：{3:.2f}{4}'.format(
-        file_name, new_file_size, new_file_size_unit, new_trans_size,
-        new_trans_size_unit
-    ))
+        receive_file(server, trans_info, trans_size)
 
-    f = open(os.path.join(RECEIVE_DIR, file_name), 'wb+')
+        # 判断是否是传输的最后一个文件
+        if trans_info['total_files'] - trans_info['current_number'] == 0:
+            break
+
+    server.close()
+    sys.exit()
+
+
+def receive_file(server, trans_info, trans_size):
+    """
+    接收文件方法
+    :param server: 服务端连接
+    :param trans_info: 传输信息
+    :param trans_size: 每次传输文件的大小
+    :return:
+    """
+    file_name = trans_info['file_info']['file_name']
+    file_size = trans_info['file_info']['file_size']
+
+    print_msg('receive', trans_info, trans_size)
+
+    # 判断接收文件的父目录是否已经创建
+    save_path = Path(RECEIVE_DIR) / trans_info['file_info']['file_relative_path']
+    if not save_path.parent.exists():
+        os.makedirs(str(save_path.parent))
+
+    f = open(save_path, 'wb+')
 
     # 已接收大小
     received_size = 0
@@ -263,12 +335,11 @@ def trans_server(trans_size, port):
             else:
                 end_time = time.time()
                 print('\n接收完毕，共用时用时：{0:.2f} s\n接收的文件路径为：{1}'.format(
-                    (end_time - start_time),
-                    os.path.abspath(os.path.join(RECEIVE_DIR, file_name))))
+                    (end_time - start_time), save_path
+                ))
 
             f.close()
-            server.close()
-            sys.exit()
+            break
 
 
 def trans_client(host, port, file_path):
@@ -279,33 +350,60 @@ def trans_client(host, port, file_path):
     :param file_path: 传输文件路径
     :return:
     """
-    file_name = os.path.basename(file_path)
-
     client = get_socket_connection(host=host, port=port, conn_type='client')
-    trans_size = float(client.recv(1024))
-
-    time.sleep(2)
     print('连接服务端成功，准备传输数据。。。')
 
-    # 向服务端发送文件名称
-    client.send(file_name.encode())
+    trans_size = float(client.recv(1024))
+    time.sleep(2)
 
-    # 接收服务端的返回值
-    return_code = int(client.recv(1024))
+    print('传输前数据准备完毕，开始传输文件：')
 
-    if return_code:
-        file_size = os.path.getsize(file_path)
-        client.send(str(file_size).encode())
-    else:
-        print('服务端接收文件名失败！')
-        sys.exit()
+    file_obj = Path(file_path)
+    files_list = get_files_list(str(file_obj))
 
-    new_trans_size, new_trans_size_unit = format_unit(trans_size)
-    new_file_size, new_file_size_unit = format_unit(file_size)
-    print('传输数据准备就绪，文件名：{0}, 文件大小：{1:.2f}{2}, 每次传输的大小：{3:.2f}{4}'.format(
-        file_name, new_file_size, new_file_size_unit, new_trans_size,
-        new_trans_size_unit
-    ))
+    current_number = 1
+    for sub_file in files_list:
+        sub_file_obj = Path(sub_file)
+
+        # sub_file 为文件的绝对路径，这里需要相对于传输目录的相对路径
+        sub_file_relative_path = '{0}/{1}'.format(
+            file_obj.name,
+            str(sub_file_obj).split(file_obj.name)[-1]
+        )
+
+        # 传输信息
+        trans_info = {
+            'total_files': len(files_list),  # 总共需要传输的文件数量
+            'current_number': current_number,  # 当前传递第几个文件数
+            'file_info': {
+                'file_name': sub_file_obj.name,
+                'file_relative_path': sub_file_relative_path,
+                'file_absolute_path': sub_file,
+                'file_size': sub_file_obj.stat().st_size,
+            }
+        }
+
+        # 向服务端传输文件信息
+        client.send(json.dumps(trans_info).encode())
+        send_file(client, trans_info, trans_size)
+
+        current_number += 1
+
+    client.close()
+    sys.exit()
+
+
+def send_file(client, trans_info, trans_size):
+    """
+    发送文件方法
+    :param client: 客户端连接
+    :param trans_info: 传输信息
+    :param trans_size: 每次传送的大小
+    :return:
+    """
+    file_size = trans_info['file_info']['file_size']
+
+    print_msg('send', trans_info, trans_size)
 
     # 每次发送的时间列表
     send_times = []
@@ -314,7 +412,7 @@ def trans_client(host, port, file_path):
     # 服务端无响应时记录的时间
     server_timeout = ''
 
-    f = open(file_path, 'rb')
+    f = open(trans_info['file_info']['file_absolute_path'], 'rb')
 
     start_time = time.time()
 
@@ -332,7 +430,6 @@ def trans_client(host, port, file_path):
                 progress_bar(file_size, send_size, '0.0M/s', fix_show_bar=True)
                 end_time = time.time()
                 print('\n传输结束，共用时：{0:.2f}s'.format(end_time-start_time))
-
                 break
 
             client.sendall(file_content)
@@ -369,11 +466,8 @@ def trans_client(host, port, file_path):
 
             if time.time() - server_timeout > 2 * 60:
                 print('\n服务端两分钟内没有返回接收信息，断开连接')
-
                 break
     f.close()
-    client.close()
-    sys.exit()
 
 
 def main():
@@ -391,10 +485,7 @@ def main():
         else:
             trans_size = args.Mbps * (1024 ** 2)
 
-        if not args.port:
-            port = 8080
-        else:
-            port = args.port
+        port = args.port if args.port else 8080
 
         trans_server(trans_size, port)
 
@@ -404,10 +495,7 @@ def main():
             print('客户端必须要指定服务端的地址')
             sys.exit()
 
-        if not args.port:
-            port = 8080
-        else:
-            port = args.port
+        port = args.port if args.port else 8080
 
         if not args.path:
             print('客户端必须要指定传输文件地址')
