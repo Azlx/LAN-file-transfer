@@ -46,7 +46,7 @@ def set_argparse():
                         type=float)
     parser.add_argument('-p', '--port', help='端口, default=8080', type=int)
     parser.add_argument('-P', '--path', help='传输文件路径')
-    parser.add_argument('-z', '--zip', action='store_true', help='是否进行压缩传输，默认为否')
+    parser.add_argument('-z', '--zip', action='store_true', help='是否进行压缩传输, 默认为否; 不需要参数，如需压缩传输加上 -z 即可')
 
     return parser.parse_args()
 
