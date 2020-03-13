@@ -3,6 +3,8 @@ import sys
 import time
 import json
 import socket
+import shutil
+import zipfile
 import argparse
 
 from pathlib import Path
@@ -12,6 +14,9 @@ BAR_LENGTH = 20
 
 # 接收文件的位置
 RECEIVE_DIR = ''
+
+# 传输文件出错列表
+TRANS_ERROR_LIST = []
 
 
 def set_argparse():
@@ -35,12 +40,13 @@ def set_argparse():
     parser.add_argument('type', help='server or client', type=str,
                         choices=['server', 'client'])
     parser.add_argument('-a', '--address', help='连接地址')
-    parser.add_argument('-p', '--port', help='端口, default=8080', type=int)
-    parser.add_argument('-P', '--path', help='传输文件路径')
     parser.add_argument('-m', '--Mbps',
-                        help='每次传输的数据包大小, default=1Mbps. '
+                        help='每次传输的数据包大小, 单位: Mbps, default=1Mbps. '
                              '注意：此选项的大小取决于网络带宽，设置过大可能会导致传输失败',
                         type=float)
+    parser.add_argument('-p', '--port', help='端口, default=8080', type=int)
+    parser.add_argument('-P', '--path', help='传输文件路径')
+    parser.add_argument('-z', '--zip', action='store_true', help='是否进行压缩传输，默认为否')
 
     return parser.parse_args()
 
@@ -100,7 +106,7 @@ def progress_bar(file_size, change_size, speed, fix_show_bar=False):
     format_file_size, format_file_size_unit = format_unit(file_size)
     file_size = '{0:.2f} {1}'.format(format_file_size, format_file_size_unit)
 
-    show_style = '\r传输进度: [{0}] {1:.2f}%  传输速度: {2}  文件大小: {3}          '.\
+    show_style = '\r\t传输进度: [{0}] {1:.2f}%  传输速度: {2}  文件大小: {3}          '.\
         format(complete, percentage, speed, file_size)
 
     sys.stdout.write(show_style if not fix_show_bar else show_style + ' ' * 10)
@@ -185,6 +191,43 @@ def get_files_list(dir_path, files=None):
     return files
 
 
+def zip_files(src_path, dst_dir):
+    """
+    压缩文件方法
+    :param src_path: 要压缩的路径
+    :param dst_dir: 压缩文件保存的路径
+    :return:
+    """
+    dst_path = Path(dst_dir) / '{0}.zip'.format(Path(src_path).name)
+    z = zipfile.ZipFile(str(dst_path), 'w', zipfile.ZIP_DEFLATED)
+
+    files_list = get_files_list(src_path)
+    for zip_file in files_list:
+        file_relative_path = \
+            zip_file.split(src_path)[-1] if zip_file.split(src_path)[-1] else Path(zip_file).name
+        print('\t-- 压缩 {0} 文件'.format(file_relative_path))
+        z.write(zip_file, file_relative_path)
+
+    z.close()
+
+    return dst_path
+
+
+def unzip_files(zip_file_path):
+    """
+    解压指定压缩文件
+    :param zip_file_path: 压缩文件，Type: Path Class
+    :return:
+    """
+    dst_path = Path(RECEIVE_DIR) / zip_file_path.name.split('.zip')[0]
+
+    z = zipfile.ZipFile(str(zip_file_path), 'r')
+    z.extractall(dst_path)
+    z.close()
+
+    return dst_path
+
+
 def print_msg(trans_type, trans_info, trans_size):
     """
     打印当前的传输信息
@@ -195,7 +238,7 @@ def print_msg(trans_type, trans_info, trans_size):
     """
     new_trans_size, new_trans_size_unit = format_unit(trans_size)
     new_file_size, new_file_size_unit = format_unit(trans_info['file_info']['file_size'])
-    print('\n当前{0}第{1}个文件，总共{2}个\n文件名：{3}, 文件大小：{4:.2f}{5}, 每次传输的大小：{6:.2f}{7}'.format(
+    print('\n当前{0}第{1}个文件，总共{2}个:\n\t文件名：{3}, 文件大小：{4:.2f}{5}, 每次传输的大小：{6:.2f}{7}'.format(
         '传输' if trans_type == 'send' else '接收',
         trans_info['current_number'],
         trans_info['total_files'],
@@ -215,15 +258,20 @@ def trans_server(trans_size, port):
     :return:
     """
     ipv4s = get_ipv4_address()
-    print('服务端启动成功，获取到服务端所有的ipv4地址为：{0}'.format(','.join(ipv4s)))
-    print('等待客户端连接中...')
+    print('服务端启动成功，获取到服务端所有的ipv4地址为：')
+    for ip in ipv4s:
+        print('\t-- {0}'.format(ip))
+
+    print('\n等待客户端连接中...')
     server, address = get_socket_connection(port=port)
-    print('客户端({0})连接成功，开始准备传输前的数据.'.format(address))
+    print('客户端({0}:{1})连接成功!'.format(address[0], address[-1]))
 
     # 向客户端发送服务端每次能接收文件的大小
+    print('\n开始准备传输前的数据：')
     server.send(str(trans_size).encode())
-
     print('传输前数据准备完毕，开始接收文件：')
+
+    receive_start_time = time.time()
 
     while True:
         # 接收客户端传送的信息
@@ -232,22 +280,51 @@ def trans_server(trans_size, port):
         # 向客户端传递 1，表示可以传输文件
         server.send('1'.encode())
 
-        receive_file(server, trans_info, trans_size)
+        save_path = Path(RECEIVE_DIR) / trans_info['file_info']['file_relative_path']
+
+        receive_file(server, trans_info, trans_size, save_path)
+
+        if trans_info['use_zip']:
+            print('\n\n压缩传输, 开始解压文件：\n\t-- 解压 {0}'.format(str(save_path.absolute())))
+            dst_path = unzip_files(save_path)
+            print('\n文件解压完成，解压后文件路径为：\n\t-- {0}\n'.format(str(dst_path.absolute())))
+
+            print('开始清理压缩文件：\n\t-- 清理 {0}'.format(str(save_path.absolute())))
+            save_path.unlink()
+            print('\n压缩文件清理完毕！\n'.format(str(save_path.absolute())))
 
         # 判断是否是传输的最后一个文件
         if trans_info['total_files'] - trans_info['current_number'] == 0:
             break
 
     server.close()
+
+    global TRANS_ERROR_LIST
+    receive_end_time = time.time()
+    print('\n全部接收完毕，共 {0} 个文件，成功 {1} 个， 失败 {2} 个， 共用时 {3:.2f} s'.format(
+        trans_info['total_files'],
+        int(trans_info['total_files']) - len(TRANS_ERROR_LIST),
+        len(TRANS_ERROR_LIST),
+        receive_end_time - receive_start_time
+    ))
+
+    if TRANS_ERROR_LIST:
+        for error_file in TRANS_ERROR_LIST:
+            print('\n接收失败文件名：{0}, 失败原因：{1}'.format(
+                error_file['file_name'],
+                error_file['error_msg']
+            ))
+
     sys.exit()
 
 
-def receive_file(server, trans_info, trans_size):
+def receive_file(server, trans_info, trans_size, save_path):
     """
     接收文件方法
     :param server: 服务端连接
     :param trans_info: 传输信息
     :param trans_size: 每次传输文件的大小
+    :param save_path: 接收文件的保存路径，类型：Path Class
     :return:
     """
     file_name = trans_info['file_info']['file_name']
@@ -256,11 +333,10 @@ def receive_file(server, trans_info, trans_size):
     print_msg('receive', trans_info, trans_size)
 
     # 判断接收文件的父目录是否已经创建
-    save_path = Path(RECEIVE_DIR) / trans_info['file_info']['file_relative_path']
     if not save_path.parent.exists():
-        os.makedirs(str(save_path.parent))
+        save_path.parent.mkdir(parents=True)
 
-    f = open(save_path, 'wb+')
+    f = open(str(save_path.absolute()), 'wb+')
 
     # 已接收大小
     received_size = 0
@@ -311,12 +387,14 @@ def receive_file(server, trans_info, trans_size):
                     if time.time() - received_null_time > 5:
                         print('接收失败，失败原因: 5s 内接收的全部是空字符串，可能客户端断开了连接')
 
-                        # 关闭文件、关闭socket连接、删除已接收的文件
+                        TRANS_ERROR_LIST.append({
+                            'file_name': file_name,
+                            'error_msg': '5s 内接收的全部是空字符串，可能客户端断开了连接',
+                        })
+                        # 关闭文件、删除已接收的文件
                         f.close()
-                        server.close()
                         os.remove(os.path.join(RECEIVE_DIR, file_name))
-
-                        sys.exit()
+                        break
             else:
                 received_null_time = ''
 
@@ -332,17 +410,21 @@ def receive_file(server, trans_info, trans_size):
             return_code = int(server.recv(1024))
             if return_code == 0:
                 print('\n传输失败，请重试！')
+                TRANS_ERROR_LIST.append({
+                    'file_name': file_name,
+                    'error_msg': '未知错误，接收失败！',
+                })
             else:
                 end_time = time.time()
-                print('\n接收完毕，共用时用时：{0:.2f} s\n接收的文件路径为：{1}'.format(
-                    (end_time - start_time), save_path
+                print('\n\t用时：{0:.2f} s\n\t文件保存路径为：{1}'.format(
+                    (end_time - start_time), str(save_path.absolute())
                 ))
 
             f.close()
             break
 
 
-def trans_client(host, port, file_path):
+def trans_client(host, port, file_path, use_zip):
     """
     客户端发送文件方法
     :param host: 服务端地址
@@ -351,15 +433,23 @@ def trans_client(host, port, file_path):
     :return:
     """
     client = get_socket_connection(host=host, port=port, conn_type='client')
-    print('连接服务端成功，准备传输数据。。。')
-
+    print('连接服务端成功，准备传输数据：')
     trans_size = float(client.recv(1024))
     time.sleep(2)
-
     print('传输前数据准备完毕，开始传输文件：')
 
-    file_obj = Path(file_path)
-    files_list = get_files_list(str(file_obj))
+    send_start_time = time.time()
+
+    if use_zip:
+        trans_cache = Path('trans_cache')
+        if not trans_cache.exists():
+            trans_cache.mkdir(parents=True)
+
+        print('\n使用压缩传输，开始压缩文件：')
+        file_path = zip_files(file_path, str(trans_cache))
+        print('\n文件压缩完成，压缩后文件路径为：\n\t-- {0}\n'.format(str(file_path.absolute())))
+
+    files_list = get_files_list(file_path)
 
     current_number = 1
     for sub_file in files_list:
@@ -367,14 +457,15 @@ def trans_client(host, port, file_path):
 
         # sub_file 为文件的绝对路径，这里需要相对于传输目录的相对路径
         sub_file_relative_path = '{0}/{1}'.format(
-            file_obj.name,
-            str(sub_file_obj).split(file_obj.name)[-1]
+            file_path.name,
+            sub_file.split(file_path.name)[-1]
         )
 
         # 传输信息
         trans_info = {
             'total_files': len(files_list),  # 总共需要传输的文件数量
             'current_number': current_number,  # 当前传递第几个文件数
+            'use_zip': use_zip,  # 是否是压缩传输
             'file_info': {
                 'file_name': sub_file_obj.name,
                 'file_relative_path': sub_file_relative_path,
@@ -390,6 +481,31 @@ def trans_client(host, port, file_path):
         current_number += 1
 
     client.close()
+
+    # 清理压缩 cache 目录
+    if use_zip:
+        print('\n\n开始清理压缩文件的缓存目录：')
+        trans_cache = Path('trans_cache')
+        if trans_cache.exists():
+            shutil.rmtree(str(trans_cache.absolute()))
+        print('\t--清理 {0} \n\n压缩文件缓存目录清理完毕！\n'.format(str(trans_cache.absolute())))
+
+    global TRANS_ERROR_LIST
+    send_end_time = time.time()
+    print('\n全部发送完毕，共 {0} 个文件，成功 {1} 个，失败 {2} 个， 共用时 {3:.2f} s'.format(
+        len(files_list),
+        len(files_list) - len(TRANS_ERROR_LIST),
+        len(TRANS_ERROR_LIST),
+        send_end_time - send_start_time
+    ))
+
+    if TRANS_ERROR_LIST:
+        for error_file in TRANS_ERROR_LIST:
+            print('\n发送失败文件名：{0}, 失败原因：{1}'.format(
+                error_file['file_name'],
+                error_file['error_msg']
+            ))
+
     sys.exit()
 
 
@@ -401,6 +517,7 @@ def send_file(client, trans_info, trans_size):
     :param trans_size: 每次传送的大小
     :return:
     """
+    file_name = trans_info['file_info']['file_name']
     file_size = trans_info['file_info']['file_size']
 
     print_msg('send', trans_info, trans_size)
@@ -415,6 +532,8 @@ def send_file(client, trans_info, trans_size):
     f = open(trans_info['file_info']['file_absolute_path'], 'rb')
 
     start_time = time.time()
+
+    global TRANS_ERROR_LIST
 
     # 先设置一次进度条
     progress_bar(file_size, send_size, '0.0M/s')
@@ -440,10 +559,8 @@ def send_file(client, trans_info, trans_size):
             if len(send_times) > 1:
                 # 计算传输速度
                 speed = get_speed(trans_size, send_times)
-
                 # 设置进度条
                 progress_bar(file_size, send_size, speed)
-
                 # 初始化时间列表
                 send_times = send_times[-1:]
 
@@ -453,11 +570,16 @@ def send_file(client, trans_info, trans_size):
             if file_content:
                 client.send('0'.encode())
                 print('\n服务端判断文件已接收完毕，但实客户端实际还没有发送完毕，传输失败')
+
+                TRANS_ERROR_LIST.append({
+                    'file_name': file_name,
+                    'error_msg': '服务端判断文件已接收完毕，但实客户端实际还没有发送完毕，传输失败',
+                })
             else:
                 client.send('1'.encode())
                 progress_bar(file_size, send_size, '0.0M/s', fix_show_bar=True)
                 end_time = time.time()
-                print('\n发送成功，共用时：{0:.2f}s'.format(end_time-start_time))
+                print('\n\t用时：{0:.2f}s'.format(end_time-start_time))
 
             break
         else:
@@ -466,6 +588,10 @@ def send_file(client, trans_info, trans_size):
 
             if time.time() - server_timeout > 2 * 60:
                 print('\n服务端两分钟内没有返回接收信息，断开连接')
+                TRANS_ERROR_LIST.append({
+                    'file_name': file_name,
+                    'error_msg': '服务端两分钟内没有返回接收信息，断开连接',
+                })
                 break
     f.close()
 
@@ -479,11 +605,8 @@ def main():
 
     # 服务端
     if args.type == 'server':
-        if not args.Mbps:
-            # 没有指定每次传输的大小则设置为 1M
-            trans_size = 1048576
-        else:
-            trans_size = args.Mbps * (1024 ** 2)
+        # 没有指定每次传输的大小则设置为 1M
+        trans_size = args.Mbps * (1024 ** 2) if args.Mbps else 1048576
 
         port = args.port if args.port else 8080
 
@@ -494,8 +617,6 @@ def main():
         if not args.address:
             print('客户端必须要指定服务端的地址')
             sys.exit()
-
-        port = args.port if args.port else 8080
 
         if not args.path:
             print('客户端必须要指定传输文件地址')
@@ -508,7 +629,10 @@ def main():
             else:
                 file_path = os.path.abspath(file_path)
 
-        trans_client(args.address, port, file_path)
+        port = args.port if args.port else 8080
+        use_zip = True if args.zip else False
+
+        trans_client(args.address, port, file_path, use_zip)
 
 
 if __name__ == '__main__':
