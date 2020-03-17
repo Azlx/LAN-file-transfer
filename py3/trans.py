@@ -264,12 +264,12 @@ def trans_server(trans_size, port):
 
     print('\n等待客户端连接中...')
     server, address = get_socket_connection(port=port)
-    print('客户端({0}:{1})连接成功!'.format(address[0], address[-1]))
+    print('\t客户端({0}:{1})连接成功!'.format(address[0], address[-1]))
 
     # 向客户端发送服务端每次能接收文件的大小
     print('\n开始准备传输前的数据：')
     server.send(str(trans_size).encode())
-    print('传输前数据准备完毕，开始接收文件：')
+    print('\t传输前数据准备完毕，开始接收文件!')
 
     receive_start_time = time.time()
 
@@ -436,7 +436,7 @@ def trans_client(host, port, file_path, use_zip):
     print('连接服务端成功，准备传输数据：')
     trans_size = float(client.recv(1024))
     time.sleep(2)
-    print('传输前数据准备完毕，开始传输文件：')
+    print('\t传输前数据准备完毕，开始传输文件!')
 
     send_start_time = time.time()
 
@@ -448,6 +448,8 @@ def trans_client(host, port, file_path, use_zip):
         print('\n使用压缩传输，开始压缩文件：')
         file_path = zip_files(file_path, str(trans_cache))
         print('\n文件压缩完成，压缩后文件路径为：\n\t-- {0}\n'.format(str(file_path.absolute())))
+    else:
+        file_path = Path(file_path)
 
     files_list = get_files_list(file_path)
 
